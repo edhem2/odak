@@ -95,6 +95,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;padding:4px 0}
     <h1 id="title">Bugün<small id="subtitle"></small></h1>
     <button class="icon-btn" id="next" aria-label="Sonraki gün">›</button>
   </header>
+  <button id="syncStatus" class="hidden" style="display:block;margin:-8px auto 12px;font-size:12px;color:var(--muted)"></button>
 
   <div id="carryBanner" class="banner hidden"><span id="carryText"></span><button id="carryBtn">Taşı</button></div>
 
@@ -140,7 +141,23 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;padding:4px 0}
   <section class="card">
     <details>
       <summary>Yedek ve ayarlar</summary>
-      <p class="muted">Veriler sadece bu cihazda saklanıyor. Ara sıra yedek almanı öneririm.</p>
+      <div style="font-weight:600;margin:10px 0 4px">Senkronizasyon (GitHub)</div>
+      <div id="syncOff">
+        <p class="muted" style="margin:0 0 8px">Telefon ve bilgisayarın aynı verileri görmesi için gizli bir GitHub reposu bağla.</p>
+        <input type="text" id="syncRepo" placeholder="kullanici/odak-data" autocapitalize="off" autocorrect="off" spellcheck="false" style="margin-bottom:8px">
+        <input type="password" id="syncToken" placeholder="Token (github_pat_…)" autocomplete="off" style="margin-bottom:8px">
+        <button class="primary" id="syncConnect">Bağlan</button>
+        <div id="syncErr" style="color:var(--red);font-size:14px;margin-top:6px"></div>
+      </div>
+      <div id="syncOn" class="hidden">
+        <p class="muted" style="margin:0 0 8px">Bağlı repo: <b id="syncRepoName"></b></p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="ghost" id="syncNow">Şimdi senkronize et</button>
+          <button class="ghost" id="syncDisconnect" style="color:var(--red)">Bağlantıyı kes</button>
+        </div>
+      </div>
+      <div style="font-weight:600;margin:16px 0 4px">Yedek</div>
+      <p class="muted" style="margin:0 0 8px">Veriler bu cihazda da saklanıyor. Ara sıra yedek almak iyi olur.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="ghost" id="exportBtn">Yedeği indir</button>
         <button class="ghost" id="copyBtn">Yedeği kopyala</button>
@@ -159,12 +176,42 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;padding:4px 0}
     try{ var s = localStorage.getItem(KEY); if(s) return JSON.parse(s); }catch(e){}
     return mem || {days:{}};
   }
-  function save(){
+  var db = load();
+  if(!db.days) db.days = {};
+  // Senkronizasyon için her iş ve her günün meta bilgisi (Top 3, not) ayrı zaman damgası taşır.
+  var snap = {}, snapT = {};
+  function metaStr(d){ return JSON.stringify([d.top, d.note||'', d.carriedTo||null, d.gone||{}]); }
+  function tStr(t){ var c = {}; Object.keys(t).sort().forEach(function(k){ if(k!=='u') c[k]=t[k]; }); return JSON.stringify(c); }
+  function snapDay(k){
+    var d = db.days[k];
+    snap[k] = metaStr(d);
+    d.tasks.forEach(function(t){ snapT[k+'|'+t.id] = tStr(t); });
+  }
+  Object.keys(db.days).forEach(function(k){
+    var d = db.days[k];
+    if(!d.mu) d.mu = 1; if(!d.gone) d.gone = {};
+    d.tasks.forEach(function(t){ if(!t.u) t.u = 1; });
+    snapDay(k);
+  });
+  function persist(){
     mem = db;
     try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){}
   }
-  var db = load();
-  if(!db.days) db.days = {};
+  function save(){
+    var ch = false, now = Date.now();
+    Object.keys(db.days).forEach(function(k){
+      var d = db.days[k];
+      if(!d.gone) d.gone = {};
+      var ms = metaStr(d);
+      if(snap[k] !== ms){ d.mu = now; snap[k] = ms; ch = true; }
+      d.tasks.forEach(function(t){
+        var key = k+'|'+t.id, s = tStr(t);
+        if(snapT[key] !== s){ t.u = now; snapT[key] = s; ch = true; }
+      });
+    });
+    persist();
+    if(ch) scheduleSync();
+  }
   try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
 
   function pad(n){ return (n<10?'0':'')+n; }
@@ -185,10 +232,6 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;padding:4px 0}
     return d || {tasks:[], top:[], note:''};
   }
   function find(d,id){ for(var i=0;i<d.tasks.length;i++) if(d.tasks[i].id===id) return d.tasks[i]; return null; }
-  function cleanup(k){
-    var d = db.days[k];
-    if(d && !d.tasks.length && !d.note && !d.carriedTo) delete db.days[k];
-  }
 
   var $ = function(id){ return document.getElementById(id); };
   function el(tag, cls, text){ var e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e; }
@@ -261,19 +304,27 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;padding:4px 0}
 
   function remove(d,t){
     var idx = d.tasks.indexOf(t), ti = d.top.indexOf(t.id);
+    var k = cur;
     d.tasks.splice(idx,1); if(ti>=0) d.top.splice(ti,1);
+    d.gone = d.gone || {}; d.gone[t.id] = Date.now();
     openId=null; save(); render();
     toast('Silindi', 'Geri al', function(){
-      d.tasks.splice(idx,0,t); if(ti>=0) d.top.splice(ti,0,t.id);
-      db.days[cur]=d; save(); render();
+      var dd = day(k,true);
+      delete dd.gone[t.id];
+      if(!find(dd,t.id)) dd.tasks.splice(Math.min(idx,dd.tasks.length),0,t);
+      if(ti>=0 && dd.top.indexOf(t.id)<0 && dd.top.length<3) dd.top.splice(ti,0,t.id);
+      t.u = Date.now() + 1; snapT[k+'|'+t.id] = tStr(t);
+      save(); render();
     });
   }
   function moveToTomorrow(d,t){
     var nk = addDays(cur,1), nd = day(nk,true);
     var ti = d.top.indexOf(t.id); if(ti>=0) d.top.splice(ti,1);
     d.tasks.splice(d.tasks.indexOf(t),1);
-    nd.tasks.push(t);
-    openId=null; cleanup(cur); save(); render();
+    d.gone = d.gone || {}; d.gone[t.id] = Date.now();
+    var c = JSON.parse(JSON.stringify(t)); delete c.u;
+    nd.tasks.push(c);
+    openId=null; save(); render();
     toast('Yarına ertelendi');
   }
 
@@ -281,7 +332,9 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;padding:4px 0}
     var f = day(fromKey), t = day(toKey,true), n=0;
     f.tasks.forEach(function(x){
       if(x.done) return;
-      var c = {id:uid(), text:x.text, col:x.col, done:false, urgent:x.urgent, delegate:x.delegate, quick:x.quick, est:x.est, since:x.since};
+      var cid = x.id+'>'+toKey;
+      if(find(t,cid)) return;
+      var c = {id:cid, text:x.text, col:x.col, done:false, urgent:x.urgent, delegate:x.delegate, quick:x.quick, est:x.est, since:x.since};
       if(f.top.indexOf(x.id)>=0) c.col='high';
       t.tasks.push(c); n++;
     });
@@ -409,6 +462,143 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;padding:4px 0}
     if(!document.hidden){ var t=todayKey(); if(cur!==t && cur===lastToday){ cur=t; } lastToday=t; render(); }
   });
   var lastToday = todayKey();
+
+  var SKEY = 'odak.sync', FILE = 'odak.json';
+  var cfg = null;
+  try{ cfg = JSON.parse(localStorage.getItem(SKEY)||'null'); }catch(e){}
+  var busy = false, again = false, syncTimer = null;
+
+  function b64enc(s){ return btoa(unescape(encodeURIComponent(s))); }
+  function b64dec(s){ return decodeURIComponent(escape(atob(s.replace(/\s/g,'')))); }
+  function hdr(accept){ return {'Authorization':'Bearer '+cfg.token, 'Accept':accept||'application/vnd.github+json'}; }
+  function api(path){ return 'https://api.github.com/repos/'+cfg.repo+path; }
+
+  function setStatus(kind, msg){
+    var s = $('syncStatus');
+    if(!cfg){ s.classList.add('hidden'); return; }
+    s.classList.remove('hidden');
+    var now = new Date();
+    s.style.color = kind==='err' ? 'var(--red)' : 'var(--muted)';
+    s.textContent = kind==='busy' ? 'Senkronize ediliyor…' : kind==='err' ? ('Senkronizasyon hatası: '+msg+' · tekrar dene') : ('Senkronize ✓ '+pad(now.getHours())+':'+pad(now.getMinutes()));
+  }
+  function syncUI(){
+    $('syncOff').classList.toggle('hidden', !!cfg);
+    $('syncOn').classList.toggle('hidden', !cfg);
+    if(cfg) $('syncRepoName').textContent = cfg.repo;
+    setStatus('ok');
+  }
+
+  function getRemote(){
+    return fetch(api('/contents/'+FILE), {headers:hdr(), cache:'no-store'}).then(function(res){
+      if(res.status===404) return {sha:null, data:{days:{}}};
+      if(res.status===401) throw new Error('token geçersiz ya da süresi dolmuş');
+      if(res.status===403) throw new Error('token\'ın bu repoya yazma izni yok');
+      if(!res.ok) throw new Error('GitHub '+res.status);
+      return res.json().then(function(j){
+        if(j.content) return {sha:j.sha, data:JSON.parse(b64dec(j.content))};
+        return fetch(api('/contents/'+FILE), {headers:hdr('application/vnd.github.raw+json'), cache:'no-store'})
+          .then(function(r){ return r.text(); })
+          .then(function(t){ return {sha:j.sha, data:JSON.parse(t)}; });
+      });
+    });
+  }
+  function putRemote(sha){
+    var body = {message:'Odak senkronizasyon', content:b64enc(JSON.stringify(db))};
+    if(sha) body.sha = sha;
+    return fetch(api('/contents/'+FILE), {method:'PUT', headers:hdr(), body:JSON.stringify(body)}).then(function(res){
+      if(res.status===409 || res.status===422) return false;
+      if(res.status===401) throw new Error('token geçersiz ya da süresi dolmuş');
+      if(res.status===403 || res.status===404) throw new Error('token\'ın bu repoya yazma izni yok');
+      if(!res.ok) throw new Error('GitHub '+res.status);
+      return true;
+    });
+  }
+  function canon(d){
+    if(!d) return '';
+    var ts = d.tasks.slice().sort(function(a,b){ return a.id<b.id?-1:a.id>b.id?1:0; }).map(function(t){ return tStr(t)+(t.u||0); });
+    var g = d.gone||{}, gs = Object.keys(g).sort().map(function(k){ return k+':'+g[k]; });
+    return JSON.stringify([ts, d.top, d.note||'', d.carriedTo||null, d.mu||0, gs]);
+  }
+  function mergeDay(l, r){
+    var gone = {}, k;
+    for(k in (l.gone||{})) gone[k] = l.gone[k];
+    for(k in (r.gone||{})) gone[k] = Math.max(gone[k]||0, r.gone[k]);
+    var map = {}, order = [];
+    l.tasks.forEach(function(t){ map[t.id] = t; order.push(t.id); });
+    r.tasks.forEach(function(t){
+      if(!map[t.id]){ map[t.id] = t; order.push(t.id); }
+      else if((t.u||0) > (map[t.id].u||0)) map[t.id] = t;
+    });
+    var tasks = order.map(function(id){ return map[id]; }).filter(function(t){ return !(gone[t.id] && gone[t.id] >= (t.u||0)); });
+    var m = (r.mu||0) > (l.mu||0) ? r : l;
+    return {tasks:tasks, top:(m.top||[]).slice(), note:m.note||'', carriedTo:m.carriedTo||undefined, mu:m.mu||0, gone:gone};
+  }
+  function merge(remote){
+    var rd = (remote && remote.days) || {}, changed = false, push = false;
+    var keys = {}; Object.keys(rd).concat(Object.keys(db.days)).forEach(function(k){ keys[k]=1; });
+    Object.keys(keys).forEach(function(k){
+      var l = db.days[k], r = rd[k], m;
+      if(!r){ push = true; return; }
+      m = l ? mergeDay(l, r) : mergeDay({tasks:[],top:[],note:'',mu:0,gone:{}}, r);
+      var cm = canon(m);
+      if(cm !== canon(l)){ db.days[k] = m; snapDay(k); changed = true; }
+      if(cm !== canon(r)) push = true;
+    });
+    if(changed){ persist(); if(!editId) render(); }
+    return push;
+  }
+  function sync(){
+    if(!cfg || !navigator.onLine) return Promise.resolve();
+    if(busy){ again = true; return Promise.resolve(); }
+    busy = true; setStatus('busy');
+    var tries = 0;
+    function round(){
+      return getRemote().then(function(r){
+        if(!merge(r.data)) return;
+        return putRemote(r.sha).then(function(ok){ if(!ok && ++tries < 3) return round(); });
+      });
+    }
+    return round().then(function(){ setStatus('ok'); }, function(e){ setStatus('err', e.message||'bağlantı yok'); })
+      .then(function(){ busy = false; if(again){ again = false; sync(); } });
+  }
+  function scheduleSync(){
+    if(!cfg) return;
+    clearTimeout(syncTimer); syncTimer = setTimeout(sync, 2000);
+  }
+
+  $('syncConnect').onclick = function(){
+    var repo = $('syncRepo').value.trim().replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'').replace(/\/$/,'');
+    var token = $('syncToken').value.trim();
+    var err = $('syncErr'); err.textContent = '';
+    if(!/^[\w.-]+\/[\w.-]+$/.test(repo)){ err.textContent = 'Repo adını kullanici/repo şeklinde yaz.'; return; }
+    if(!token){ err.textContent = 'Token\'ı yapıştır.'; return; }
+    cfg = {repo:repo, token:token};
+    this.textContent = 'Bağlanıyor…';
+    var btn = this;
+    fetch(api(''), {headers:hdr(), cache:'no-store'}).then(function(res){
+      if(res.status===401) throw new Error('Token geçersiz.');
+      if(res.status===404) throw new Error('Repo bulunamadı ya da token\'ın bu repoya erişimi yok.');
+      if(!res.ok) throw new Error('GitHub '+res.status);
+      return res.json();
+    }).then(function(j){
+      if(!j.private){ throw new Error('Bu repo herkese açık. Verilerin için gizli (private) bir repo kullan.'); }
+      try{ localStorage.setItem(SKEY, JSON.stringify(cfg)); }catch(e){}
+      $('syncToken').value = '';
+      syncUI(); return sync().then(function(){ toast('Senkronizasyon açık'); });
+    }).catch(function(e){
+      cfg = null; err.textContent = e.message || 'Bağlanılamadı, interneti kontrol et.';
+    }).then(function(){ btn.textContent = 'Bağlan'; });
+  };
+  $('syncDisconnect').onclick = function(){
+    cfg = null; try{ localStorage.removeItem(SKEY); }catch(e){}
+    syncUI(); toast('Senkronizasyon kapatıldı. Veriler bu cihazda kalıyor.');
+  };
+  $('syncNow').onclick = function(){ sync(); };
+  $('syncStatus').onclick = function(){ sync(); };
+  window.addEventListener('online', function(){ sync(); });
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden) sync(); });
+  setInterval(function(){ if(!document.hidden) sync(); }, 60000);
+  syncUI(); sync();
 
   if('serviceWorker' in navigator && location.protocol==='https:'){
     navigator.serviceWorker.register('sw.js').catch(function(){});

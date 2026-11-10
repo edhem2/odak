@@ -1,4 +1,4 @@
-const CACHE = 'odak-v1';
+const CACHE = 'odak-v2';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
@@ -12,6 +12,7 @@ self.addEventListener('activate', e => {
 // Önce ağ, olmazsa önbellek: güncellemeler hemen gelir, internet yokken de açılır.
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  if (new URL(e.request.url).origin !== self.location.origin) return; // GitHub API isteklerine dokunma
   e.respondWith(
     fetch(e.request).then(r => {
       const copy = r.clone();
